@@ -24,30 +24,79 @@ let cachedData = null;
 let lastFetchTime = 0;
 const CACHE_TTL = 300000; // 5 minutes
 
-async function fetchTickerPrice(symbol) {
+async function fetchTickerPriceYahoo(symbol) {
   try {
     const response = await axios.get(
       `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}`,
       {
         params: { modules: 'price' },
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        timeout: 5000
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        timeout: 8000
       }
     );
     
-    return response.data?.quoteSummary?.result?.[0]?.price?.regularMarketPrice || null;
+    const price = response.data?.quoteSummary?.result?.[0]?.price?.regularMarketPrice;
+    if (price) {
+      console.log(`✓ ${symbol}: $${price}`);
+      return price;
+    }
+    return null;
   } catch (e) {
-    console.log(`Failed to fetch ${symbol}:`, e.message);
+    console.log(`✗ Yahoo Finance failed for ${symbol}: ${e.message}`);
     return null;
   }
 }
 
+async function fetchTickerPriceAlpha(symbol) {
+  try {
+    // Fallback to Alpha Vantage or similar
+    const response = await axios.get(
+      `https://www.alphavantage.co/query`,
+      {
+        params: {
+          function: 'GLOBAL_QUOTE',
+          symbol: symbol,
+          apikey: 'demo'
+        },
+        timeout: 8000
+      }
+    );
+    
+    const price = response.data?.['Global Quote']?.['05. price'];
+    if (price && price !== '0') {
+      console.log(`✓ Alpha ${symbol}: $${price}`);
+      return parseFloat(price);
+    }
+    return null;
+  } catch (e) {
+    console.log(`✗ Alpha Vantage failed for ${symbol}: ${e.message}`);
+    return null;
+  }
+}
+
+async function fetchTickerPrice(symbol) {
+  // Try Yahoo first
+  let price = await fetchTickerPriceYahoo(symbol);
+  if (price) return price;
+  
+  // Fallback to Alpha Vantage
+  price = await fetchTickerPriceAlpha(symbol);
+  if (price) return price;
+  
+  return null;
+}
+
 async function fetchFearAndGreed() {
   try {
-    const response = await axios.get('https://api.alternative.me/fng/', { timeout: 5000 });
-    return response.data?.data?.[0]?.value ? parseInt(response.data.data[0].value) : null;
+    const response = await axios.get('https://api.alternative.me/fng/', { timeout: 8000 });
+    const value = response.data?.data?.[0]?.value;
+    if (value) {
+      console.log(`✓ Fear & Greed: ${value}`);
+      return parseInt(value);
+    }
+    return null;
   } catch (e) {
-    console.log('Failed to fetch Fear & Greed:', e.message);
+    console.log('✗ Failed to fetch Fear & Greed:', e.message);
     return null;
   }
 }
@@ -56,8 +105,10 @@ async function fetchAllData() {
   const tickers = {};
   const macros = {};
   
-  // Fetch macros
+  console.log('=== FETCHING MARKET DATA ===');
   console.log('Fetching macros...');
+  
+  // Fetch macros
   for (const macro of MACRO_TICKERS) {
     const price = await fetchTickerPrice(macro);
     macros[macro] = price;
@@ -66,22 +117,34 @@ async function fetchAllData() {
   
   // Fetch Fear & Greed
   const fearGreed = await fetchFearAndGreed();
+  macros['FEAR_GREED'] = fearGreed;
   
-  // Fetch tickers
   console.log('Fetching tickers...');
-  for (const ticker of ALL_TICKERS) {
+  
+  // Fetch tickers in batches
+  for (let i = 0; i < ALL_TICKERS.length; i++) {
+    const ticker = ALL_TICKERS[i];
     const price = await fetchTickerPrice(ticker);
     tickers[ticker] = price;
-    await new Promise(r => setTimeout(r, 300)); // Rate limit
+    
+    // Add delay every 5 tickers to avoid rate limiting
+    if ((i + 1) % 5 === 0) {
+      await new Promise(r => setTimeout(r, 1000));
+    } else {
+      await new Promise(r => setTimeout(r, 300));
+    }
   }
   
   cachedData = {
     tickers,
     macros,
-    fearGreed,
     timestamp: Date.now()
   };
   lastFetchTime = Date.now();
+  
+  console.log('=== FETCH COMPLETE ===');
+  console.log(`Tickers fetched: ${Object.values(tickers).filter(v => v !== null).length}/${ALL_TICKERS.length}`);
+  console.log(`Macros fetched: ${Object.values(macros).filter(v => v !== null).length}/${MACRO_TICKERS.length + 1}`);
   
   return cachedData;
 }
@@ -90,20 +153,26 @@ app.get('/api/market-data', async (req, res) => {
   try {
     // Return cached data if fresh
     if (cachedData && (Date.now() - lastFetchTime) < CACHE_TTL) {
+      console.log('Returning cached data');
       return res.json(cachedData);
     }
     
+    console.log('Cache expired or empty, fetching new data...');
     // Fetch new data
     const data = await fetchAllData();
     res.json(data);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: 'Failed to fetch data' });
+    // Return partial cached data if available
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+    res.status(500).json({ error: 'Failed to fetch data', tickers: {}, macros: {} });
   }
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', cached: cachedData ? true : false });
 });
 
 const PORT = process.env.PORT || 3000;
