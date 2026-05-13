@@ -1,13 +1,15 @@
 const express = require('express');
 const cors = require('cors');
 const PricingEngine = require('./pricing-engine');
+const QuoteAPI = require('./quote-api');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize pricing engine
+// Initialize pricing engine and quote API
 const pricingEngine = new PricingEngine();
+const quoteAPI = new QuoteAPI();
 
 // All tickers
 const ALL_TICKERS = [
@@ -108,7 +110,27 @@ app.get('/api/market-data', async (req, res) => {
 });
 
 /**
- * API endpoint: Get single ticker
+ * API endpoint: Get single quote with multi-source failover
+ * Supports VIX, BRENT, and regular tickers
+ */
+app.get('/api/quote', async (req, res) => {
+  try {
+    const { symbol } = req.query;
+    
+    if (!symbol) {
+      return res.status(400).json({ error: 'symbol parameter required' });
+    }
+    
+    const quote = await quoteAPI.getQuote(symbol.toUpperCase());
+    res.json(quote);
+  } catch (error) {
+    console.error('Quote API error:', error);
+    res.status(500).json({ error: 'Failed to fetch quote' });
+  }
+});
+
+/**
+ * API endpoint: Get single ticker (legacy)
  */
 app.get('/api/quote/:symbol', async (req, res) => {
   try {
