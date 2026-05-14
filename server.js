@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -18,49 +20,57 @@ const ALL_TICKERS = [
 
 const MACRO_TICKERS = ["SPY", "QQQ", "VOO", "^VIX", "BZ=F"];
 const FINNHUB_KEY = 'd82ac0hr01qmgc0fa6vgd82ac0hr01qmgc0fa700';
-const ALPHA_VANTAGE_KEY = 'demo';
 
-// Cache for market data
-let cachedData = null;
-let lastFetchTime = 0;
-const CACHE_TTL = 300000; // 5 minutes
-const priceCache = new Map();
-const priceCacheExpiry = new Map();
+// Persistent price cache (file-based)
+const CACHE_FILE = '/tmp/war-room-prices.json';
+let priceCache = {};
+let priceFreshness = {}; // Track if price is fresh or stale
 
-/**
- * Get cached price if valid
- */
-function getCachedPrice(symbol) {
-  if (!priceCache.has(symbol)) return null;
-  const expiry = priceCacheExpiry.get(symbol);
-  if (Date.now() > expiry) {
-    priceCache.delete(symbol);
-    priceCacheExpiry.delete(symbol);
-    return null;
+// Load persistent cache on startup
+function loadPersistentCache() {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+      priceCache = data.prices || {};
+      priceFreshness = data.freshness || {};
+      console.log(`Loaded ${Object.keys(priceCache).length} prices from cache`);
+    }
+  } catch (e) {
+    console.error('Failed to load cache:', e.message);
   }
-  return priceCache.get(symbol);
+}
+
+// Save persistent cache
+function savePersistentCache() {
+  try {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify({ prices: priceCache, freshness: priceFreshness }, null, 2));
+  } catch (e) {
+    console.error('Failed to save cache:', e.message);
+  }
+}
+
+// Sleep utility
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
 /**
- * Set cached price
- */
-function setCachedPrice(symbol, price) {
-  priceCache.set(symbol, price);
-  priceCacheExpiry.set(symbol, Date.now() + 600000); // 10 min cache
-}
-
-/**
- * Fetch from Finnhub
+ * Fetch from Finnhub (single ticker)
  */
 async function fetchFromFinnhub(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_KEY}`, {
-      timeout: 5000
+      timeout: 8000
     });
     const data = await res.json();
-    return data?.c || null;
+    if (data?.c) {
+      console.log(`    [Finnhub] ${symbol}: $${data.c}`);
+      return data.c;
+    }
+    console.log(`    [Finnhub] ${symbol}: no price in response`);
+    return null;
   } catch (e) {
-    console.error(`Finnhub failed for ${symbol}:`, e.message);
+    console.log(`    [Finnhub] ${symbol}: ${e.message}`);
     return null;
   }
 }
@@ -72,12 +82,18 @@ async function fetchFromYahoo(symbol) {
   try {
     const res = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 5000
+      timeout: 8000
     });
     const data = await res.json();
-    return data?.quoteSummary?.result?.[0]?.price?.regularMarketPrice || null;
+    const price = data?.quoteSummary?.result?.[0]?.price?.regularMarketPrice;
+    if (price) {
+      console.log(`    [Yahoo] ${symbol}: $${price}`);
+      return price;
+    }
+    console.log(`    [Yahoo] ${symbol}: no price in response`);
+    return null;
   } catch (e) {
-    console.error(`Yahoo failed for ${symbol}:`, e.message);
+    console.log(`    [Yahoo] ${symbol}: ${e.message}`);
     return null;
   }
 }
@@ -88,61 +104,42 @@ async function fetchFromYahoo(symbol) {
 async function fetchFromAlphaVantage(symbol) {
   try {
     const res = await fetch(
-      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`,
-      { timeout: 5000 }
+      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=demo`,
+      { timeout: 8000 }
     );
     const data = await res.json();
-    return parseFloat(data?.['Global Quote']?.['05. price']) || null;
+    const price = parseFloat(data?.['Global Quote']?.['05. price']);
+    if (price && price > 0) {
+      console.log(`    [Alpha Vantage] ${symbol}: $${price}`);
+      return price;
+    }
+    console.log(`    [Alpha Vantage] ${symbol}: no price in response`);
+    return null;
   } catch (e) {
-    console.error(`Alpha Vantage failed for ${symbol}:`, e.message);
+    console.log(`    [Alpha Vantage] ${symbol}: ${e.message}`);
     return null;
   }
 }
 
 /**
- * Fetch from Twelve Data
+ * Fetch single ticker with retry logic
  */
-async function fetchFromTwelveData(symbol) {
-  try {
-    const res = await fetch(
-      `https://api.twelvedata.com/quote?symbol=${symbol}&apikey=demo`,
-      { timeout: 5000 }
-    );
-    const data = await res.json();
-    return parseFloat(data?.price) || null;
-  } catch (e) {
-    console.error(`Twelve Data failed for ${symbol}:`, e.message);
-    return null;
-  }
-}
-
-/**
- * Fetch price with multi-source fallback
- */
-async function fetchPrice(symbol) {
-  // Check cache first
-  const cached = getCachedPrice(symbol);
-  if (cached) {
-    console.log(`  Cache hit: ${symbol} = $${cached}`);
-    return cached;
-  }
-
-  console.log(`  Fetching ${symbol}...`);
+async function fetchTickerWithRetry(symbol, attempt = 1) {
+  console.log(`  Fetching ${symbol} (attempt ${attempt})...`);
 
   // Try sources in order
   const sources = [
     () => fetchFromFinnhub(symbol),
     () => fetchFromYahoo(symbol),
-    () => fetchFromAlphaVantage(symbol),
-    () => fetchFromTwelveData(symbol)
+    () => fetchFromAlphaVantage(symbol)
   ];
 
   for (const source of sources) {
     try {
       const price = await source();
       if (price && price > 0) {
-        setCachedPrice(symbol, price);
-        console.log(`    ✓ ${symbol}: $${price}`);
+        priceCache[symbol] = price;
+        priceFreshness[symbol] = Date.now();
         return price;
       }
     } catch (e) {
@@ -150,22 +147,36 @@ async function fetchPrice(symbol) {
     }
   }
 
-  console.log(`    ✗ ${symbol}: failed all sources`);
+  // If first attempt failed, retry once after delay
+  if (attempt === 1) {
+    console.log(`  ${symbol} failed, retrying in 3s...`);
+    await sleep(3000);
+    return fetchTickerWithRetry(symbol, 2);
+  }
+
+  // If still no price, use cached price if available
+  if (priceCache[symbol]) {
+    console.log(`  ${symbol}: using cached price $${priceCache[symbol]} (stale)`);
+    return priceCache[symbol];
+  }
+
+  console.log(`  ${symbol}: FAILED - no price available`);
   return null;
 }
 
 /**
- * Fetch all market data
+ * Fetch all market data with batching and throttling
  */
 async function fetchAllData() {
-  console.log('=== FETCHING MARKET DATA ===');
+  console.log('\n=== FETCHING MARKET DATA ===');
   
   // Fetch macros
   console.log('Fetching macros...');
   const macros = {};
   for (const ticker of MACRO_TICKERS) {
-    const price = await fetchPrice(ticker);
+    const price = await fetchTickerWithRetry(ticker);
     macros[ticker] = price;
+    await sleep(500);
   }
   
   // Fetch Fear & Greed
@@ -179,44 +190,73 @@ async function fetchAllData() {
     macros['FEAR_GREED'] = null;
   }
   
-  // Fetch all tickers with staggered requests
-  console.log(`Fetching ${ALL_TICKERS.length} tickers...`);
-  const tickerPrices = {};
-  let successCount = 0;
+  // Fetch all tickers in batches with throttling
+  console.log(`\nFetching ${ALL_TICKERS.length} tickers in batches...`);
+  const BATCH_SIZE = 8;
+  const BATCH_DELAY = 1000; // 1 second between batches
   
-  for (let i = 0; i < ALL_TICKERS.length; i++) {
-    const ticker = ALL_TICKERS[i];
-    const price = await fetchPrice(ticker);
-    tickerPrices[ticker] = price;
+  for (let i = 0; i < ALL_TICKERS.length; i += BATCH_SIZE) {
+    const batch = ALL_TICKERS.slice(i, i + BATCH_SIZE);
+    console.log(`\nBatch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(ALL_TICKERS.length / BATCH_SIZE)}: ${batch.join(', ')}`);
     
-    if (price !== null) {
-      successCount++;
-    }
+    // Fetch batch in parallel
+    await Promise.all(batch.map(ticker => fetchTickerWithRetry(ticker)));
     
-    // Rate limiting
-    if ((i + 1) % 5 === 0) {
-      console.log(`  (Processed ${i + 1}/${ALL_TICKERS.length})`);
-      await new Promise(r => setTimeout(r, 1000));
+    // Delay before next batch
+    if (i + BATCH_SIZE < ALL_TICKERS.length) {
+      console.log(`Waiting ${BATCH_DELAY}ms before next batch...`);
+      await sleep(BATCH_DELAY);
     }
   }
   
-  cachedData = {
+  // Build response
+  const tickerPrices = {};
+  const tickerStale = {};
+  let freshCount = 0;
+  let staleCount = 0;
+  
+  for (const ticker of ALL_TICKERS) {
+    const price = priceCache[ticker];
+    tickerPrices[ticker] = price;
+    
+    if (price) {
+      const freshness = priceFreshness[ticker];
+      const age = Date.now() - freshness;
+      const isStale = age > 300000; // 5 minutes
+      
+      if (isStale) {
+        staleCount++;
+        tickerStale[ticker] = true;
+      } else {
+        freshCount++;
+      }
+    }
+  }
+  
+  const cachedData = {
     tickers: tickerPrices,
+    stale: tickerStale,
     macros,
     timestamp: Date.now(),
     stats: { 
-      cachedSymbols: successCount,
-      totalTickers: ALL_TICKERS.length
+      fresh: freshCount,
+      stale: staleCount,
+      total: ALL_TICKERS.length
     }
   };
   
-  lastFetchTime = Date.now();
+  // Save cache
+  savePersistentCache();
   
-  console.log('=== FETCH COMPLETE ===');
-  console.log(`Tickers fetched: ${successCount}/${ALL_TICKERS.length}`);
+  console.log('\n=== FETCH COMPLETE ===');
+  console.log(`Fresh: ${freshCount}, Stale: ${staleCount}, Total: ${ALL_TICKERS.length}`);
   
   return cachedData;
 }
+
+let cachedData = null;
+let lastFetchTime = 0;
+const CACHE_TTL = 300000; // 5 minutes
 
 /**
  * API endpoint: Get all market data
@@ -230,8 +270,9 @@ app.get('/api/market-data', async (req, res) => {
     }
     
     console.log('Cache expired, fetching new data...');
-    const data = await fetchAllData();
-    res.json(data);
+    cachedData = await fetchAllData();
+    lastFetchTime = Date.now();
+    res.json(cachedData);
   } catch (error) {
     console.error('Error:', error);
     
@@ -249,30 +290,6 @@ app.get('/api/market-data', async (req, res) => {
 });
 
 /**
- * API endpoint: Get single quote
- */
-app.get('/api/quote', async (req, res) => {
-  try {
-    const { symbol } = req.query;
-    
-    if (!symbol) {
-      return res.status(400).json({ error: 'symbol parameter required' });
-    }
-    
-    const price = await fetchPrice(symbol.toUpperCase());
-    
-    if (price === null) {
-      return res.status(404).json({ error: 'Failed to fetch price' });
-    }
-    
-    res.json({ symbol: symbol.toUpperCase(), price, source: 'Multi-source' });
-  } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: 'Failed to fetch quote' });
-  }
-});
-
-/**
  * Health check
  */
 app.get('/health', (req, res) => {
@@ -280,7 +297,8 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     cached: cachedData ? true : false,
     lastFetch: lastFetchTime,
-    cacheAge: Date.now() - lastFetchTime
+    cacheAge: Date.now() - lastFetchTime,
+    cachedPrices: Object.keys(priceCache).length
   });
 });
 
@@ -289,12 +307,17 @@ app.get('/health', (req, res) => {
  */
 async function startup() {
   console.log('Starting War Room Backend...');
+  loadPersistentCache();
   
   // Fetch initial data
-  await fetchAllData();
+  cachedData = await fetchAllData();
+  lastFetchTime = Date.now();
   
   // Refresh every 5 minutes
-  setInterval(fetchAllData, CACHE_TTL);
+  setInterval(async () => {
+    cachedData = await fetchAllData();
+    lastFetchTime = Date.now();
+  }, CACHE_TTL);
   
   console.log('Backend ready!');
 }
