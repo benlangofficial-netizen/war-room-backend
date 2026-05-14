@@ -1,17 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const PricingEngine = require('./pricing-engine');
-const QuoteAPI = require('./quote-api');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize pricing engine and quote API
-const pricingEngine = new PricingEngine();
-const quoteAPI = new QuoteAPI();
-
-// All 66 tickers (65 + GOOG)
+// All 66 tickers
 const ALL_TICKERS = [
   "RCAT", "KTOS", "CEG", "OKLO", "PLTR", "QBTS", "AXON", "CRDO", "LDOS", "INOD",
   "VST", "FORM", "IREN", "CCJ", "RBRK", "CDNS", "IONQ", "AVGO", "LMT", "ANET",
@@ -22,12 +16,29 @@ const ALL_TICKERS = [
   "RKLB", "MRVL", "COHR", "NVTS", "NBIS", "GOOG"
 ];
 
-const MACRO_TICKERS = ["SPY", "QQQ", "VOO", "^VIX", "BZ=F"];
+const MACRO_TICKERS = ["SPY", "QQQ", "VOO"];
+const FINNHUB_KEY = 'd82ac0hr01qmgc0fa6vgd82ac0hr01qmgc0fa700';
 
 // Cache for market data
 let cachedData = null;
 let lastFetchTime = 0;
 const CACHE_TTL = 300000; // 5 minutes
+
+/**
+ * Fetch price from Finnhub
+ */
+async function fetchFromFinnhub(symbol) {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_KEY}`, {
+      timeout: 5000
+    });
+    const data = await res.json();
+    return data?.c || null;
+  } catch (e) {
+    console.error(`Finnhub failed for ${symbol}:`, e.message);
+    return null;
+  }
+}
 
 /**
  * Fetch all market data
@@ -39,8 +50,9 @@ async function fetchAllData() {
   console.log('Fetching macros...');
   const macros = {};
   for (const ticker of MACRO_TICKERS) {
-    const data = await pricingEngine.fetchPrice(ticker);
-    macros[ticker] = data?.price || null;
+    const price = await fetchFromFinnhub(ticker);
+    macros[ticker] = price;
+    console.log(`  ${ticker}: ${price || 'null'}`);
   }
   
   // Fetch Fear & Greed
@@ -48,32 +60,50 @@ async function fetchAllData() {
     const res = await fetch('https://api.alternative.me/fng/?limit=1');
     const data = await res.json();
     macros['FEAR_GREED'] = parseInt(data.data[0].value);
+    console.log(`  FEAR_GREED: ${macros['FEAR_GREED']}`);
   } catch (e) {
     console.error('Fear & Greed fetch failed:', e.message);
     macros['FEAR_GREED'] = null;
   }
   
-  // Fetch all tickers in parallel
-  console.log('Fetching tickers...');
-  const tickers = await pricingEngine.fetchPrices(ALL_TICKERS);
-  
-  // Convert to simple price map
+  // Fetch all tickers sequentially with rate limiting
+  console.log(`Fetching ${ALL_TICKERS.length} tickers...`);
   const tickerPrices = {};
-  for (const [symbol, data] of Object.entries(tickers)) {
-    tickerPrices[symbol] = data?.price || null;
+  let successCount = 0;
+  
+  for (let i = 0; i < ALL_TICKERS.length; i++) {
+    const ticker = ALL_TICKERS[i];
+    const price = await fetchFromFinnhub(ticker);
+    tickerPrices[ticker] = price;
+    
+    if (price !== null) {
+      successCount++;
+      console.log(`  ✓ ${ticker}: $${price}`);
+    } else {
+      console.log(`  ✗ ${ticker}: null`);
+    }
+    
+    // Rate limit: add delay between requests
+    if ((i + 1) % 10 === 0) {
+      console.log(`  (Rate limiting: waiting 500ms after ${i + 1} requests)`);
+      await new Promise(r => setTimeout(r, 500));
+    }
   }
   
   cachedData = {
     tickers: tickerPrices,
     macros,
     timestamp: Date.now(),
-    stats: pricingEngine.getStats()
+    stats: { 
+      cachedSymbols: successCount,
+      totalTickers: ALL_TICKERS.length
+    }
   };
   
   lastFetchTime = Date.now();
   
   console.log('=== FETCH COMPLETE ===');
-  console.log(`Tickers fetched: ${Object.values(tickerPrices).filter(v => v !== null).length}/${ALL_TICKERS.length}`);
+  console.log(`Tickers fetched: ${successCount}/${ALL_TICKERS.length}`);
   console.log(`Macros fetched: ${Object.values(macros).filter(v => v !== null).length}/${MACRO_TICKERS.length + 1}`);
   
   return cachedData;
@@ -110,8 +140,7 @@ app.get('/api/market-data', async (req, res) => {
 });
 
 /**
- * API endpoint: Get single quote with multi-source failover
- * Supports VIX, BRENT, and regular tickers
+ * API endpoint: Get single quote
  */
 app.get('/api/quote', async (req, res) => {
   try {
@@ -121,49 +150,16 @@ app.get('/api/quote', async (req, res) => {
       return res.status(400).json({ error: 'symbol parameter required' });
     }
     
-    const quote = await quoteAPI.getQuote(symbol.toUpperCase());
-    res.json(quote);
-  } catch (error) {
-    console.error('Quote API error:', error);
-    res.status(500).json({ error: 'Failed to fetch quote' });
-  }
-});
-
-/**
- * API endpoint: Get single ticker (legacy)
- */
-app.get('/api/quote/:symbol', async (req, res) => {
-  try {
-    const { symbol } = req.params;
-    const data = await pricingEngine.fetchPrice(symbol.toUpperCase());
+    const price = await fetchFromFinnhub(symbol.toUpperCase());
     
-    if (!data) {
-      return res.status(404).json({ error: 'Ticker not found' });
+    if (price === null) {
+      return res.status(404).json({ error: 'Failed to fetch price' });
     }
     
-    res.json(data);
+    res.json({ symbol: symbol.toUpperCase(), price, source: 'Finnhub' });
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: 'Failed to fetch quote' });
-  }
-});
-
-/**
- * API endpoint: Get multiple tickers
- */
-app.post('/api/quotes', async (req, res) => {
-  try {
-    const { symbols } = req.body;
-    
-    if (!Array.isArray(symbols)) {
-      return res.status(400).json({ error: 'symbols must be an array' });
-    }
-    
-    const data = await pricingEngine.fetchPrices(symbols);
-    res.json(data);
-  } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: 'Failed to fetch quotes' });
   }
 });
 
@@ -174,7 +170,8 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     cached: cachedData ? true : false,
-    stats: pricingEngine.getStats()
+    lastFetch: lastFetchTime,
+    cacheAge: Date.now() - lastFetchTime
   });
 });
 
