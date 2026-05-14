@@ -196,7 +196,12 @@ async function fetchAllData() {
   console.log('Fetching macros...');
   const macros = {};
   for (const ticker of MACRO_TICKERS) {
-    const price = await fetchTickerWithRetry(ticker);
+    let price = await fetchTickerWithRetry(ticker);
+    // Force fallback for VIX and Brent if null
+    if (price === null && FALLBACK_PRICES[ticker]) {
+      price = FALLBACK_PRICES[ticker];
+      console.log(`  Using fallback for ${ticker}: $${price}`);
+    }
     macros[ticker] = price;
     await sleep(500);
   }
