@@ -11,15 +11,15 @@ app.use(express.json());
 const pricingEngine = new PricingEngine();
 const quoteAPI = new QuoteAPI();
 
-// All tickers
+// All 66 tickers (65 + GOOG)
 const ALL_TICKERS = [
-  "HII", "STRL", "LDOS", "FTAI", "AXON", "PANW", "CEG", "PLTR", "CCJ",
-  "KTOS", "BWXT", "CRWD", "VST", "GLW", "TER", "ONTO", "VRT", "NNE",
-  "RBRK", "FORM", "ZS", "ANET", "ASTS", "MU", "MRVL", "COHR", "OKLO",
-  "INFQ", "SMR", "RCAT", "CRDO", "AAPL", "AMD", "PWR", "LRCX",
-  "CRWV", "BE", "TSLA", "RKLB", "INTC", "NVTS", "PL", "HUM", "QCOM",
-  "IREN", "DDOG", "USAR", "IONQ", "STX", "QBTS", "WDC", "AVGO", "HWM", "ORCL", "AMZN", "CDNS",
-  "APLD", "ARM", "TSM", "NBIS", "CLS", "ONDS", "SLV", "LMT", "INOD"
+  "RCAT", "KTOS", "CEG", "OKLO", "PLTR", "QBTS", "AXON", "CRDO", "LDOS", "INOD",
+  "VST", "FORM", "IREN", "CCJ", "RBRK", "CDNS", "IONQ", "AVGO", "LMT", "ANET",
+  "HII", "ONTO", "PL", "CLS", "AMD", "BWXT", "ONDS", "INTC", "FTAI", "SLV",
+  "WDC", "TSM", "STX", "VRT", "TER", "PWR", "DDOG", "USAR", "NNE", "AMZN",
+  "HWM", "QCOM", "AAPL", "ORCL", "STRL", "CRWD", "LRCX", "TSLA", "ASTS", "INFQ",
+  "ZS", "HUM", "CRWV", "APLD", "MU", "PANW", "BE", "LITE", "GLW", "ARM",
+  "RKLB", "MRVL", "COHR", "NVTS", "NBIS", "GOOG"
 ];
 
 const MACRO_TICKERS = ["SPY", "QQQ", "VOO", "^VIX", "BZ=F"];

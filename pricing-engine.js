@@ -21,7 +21,7 @@ class PricingEngine {
     // API Keys (use free tier keys - replace with your own)
     this.apiKeys = {
       polygon: process.env.POLYGON_API_KEY || 'YOUR_POLYGON_KEY',
-      finnhub: process.env.FINNHUB_API_KEY || 'YOUR_FINNHUB_KEY',
+      finnhub: process.env.FINNHUB_API_KEY || 'd82ac0hr01qmgc0fa6vgd82ac0hr01qmgc0fa700',
       twelveData: process.env.TWELVE_DATA_API_KEY || 'YOUR_TWELVE_DATA_KEY',
       alphaVantage: process.env.ALPHA_VANTAGE_API_KEY || 'demo',
       fmp: process.env.FMP_API_KEY || 'YOUR_FMP_KEY'
