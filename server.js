@@ -16,7 +16,7 @@ const ALL_TICKERS = [
   "RKLB", "MRVL", "COHR", "NVTS", "NBIS", "GOOG"
 ];
 
-const MACRO_TICKERS = ["SPY", "QQQ", "VOO"];
+const MACRO_TICKERS = ["SPY", "QQQ", "VOO", "^VIX", "BZ=F"];
 const FINNHUB_KEY = 'd82ac0hr01qmgc0fa6vgd82ac0hr01qmgc0fa700';
 
 // Cache for market data
@@ -66,14 +66,21 @@ async function fetchAllData() {
     macros['FEAR_GREED'] = null;
   }
   
-  // Fetch all tickers sequentially with rate limiting
+  // Fetch all tickers sequentially with rate limiting and retry
   console.log(`Fetching ${ALL_TICKERS.length} tickers...`);
   const tickerPrices = {};
   let successCount = 0;
   
   for (let i = 0; i < ALL_TICKERS.length; i++) {
     const ticker = ALL_TICKERS[i];
-    const price = await fetchFromFinnhub(ticker);
+    let price = await fetchFromFinnhub(ticker);
+    
+    // Retry once if null
+    if (price === null) {
+      await new Promise(r => setTimeout(r, 300));
+      price = await fetchFromFinnhub(ticker);
+    }
+    
     tickerPrices[ticker] = price;
     
     if (price !== null) {
